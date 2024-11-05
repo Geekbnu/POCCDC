@@ -7,7 +7,6 @@ using POC;
 using StackExchange.Redis;
 using System.Data.SqlClient;
 using System.Diagnostics;
-using System.Linq;
 
 namespace ForeignKeysQuery
 {
@@ -97,8 +96,7 @@ namespace ForeignKeysQuery
 
                                         if (DependencyCheck == true)
                                         {
-                                            var newFkReferences = await GetNewReferencePKFromDatabaseAsync(detail, table, foreignKeys);
-                                            await ExecuteOperationDatabaseAsync(table, detail, op, newFkReferences);
+                                            await ExecuteOperationDatabaseAsync(table, detail, op);
                                         }
 
                                         consumer.Commit(consumeResult);
@@ -136,38 +134,6 @@ namespace ForeignKeysQuery
         }
 
         /// <summary>
-        /// Busca referência das FK no banco destino para garantir teremos os ID corretos para relacionar.
-        /// </summary>
-        /// <param name="data"></param>
-        /// <param name="fks"></param>
-        /// <returns>Relação de IDs atualizados</returns>
-        private static async Task<Dictionary<string, object>> GetNewReferencePKFromDatabaseAsync(dynamic data, string table, IEnumerable<ForeignKeyInfo?> fks)
-        {
-            var dictionary = new Dictionary<string, object>();
-
-            using (var connection = new NpgsqlConnection(connectionStringPostgres))
-            {
-                await connection.OpenAsync();
-
-                var tableFks = fks.Where(c => c.ParentTable.Equals(table));
-
-                foreach (var fk in tableFks)
-                {
-                    // Busque pela ReferencedColumn, ou seja, para a coluna na tabela pai que é ID do filho.
-                    var query = @$"SELECT {fk?.ReferencedColumn} FROM {schemaPostgres}.{fk?.ReferencedTable} WHERE s_{fk?.ReferencedColumn} = '{data[fk?.ParentColumn]}' LIMIT 1";
-                    var value = await connection.QueryFirstOrDefaultAsync<int?>(query, new { value = (string)data[fk?.ParentColumn] });
-
-                    if (value.HasValue)
-                    {
-                        dictionary.Add(fk.ParentColumn, value.Value);
-                    }
-                }
-            }
-
-            return dictionary;
-        }
-
-        /// <summary>
         /// Executa a operação no banco de dados
         /// </summary>
         /// <param name="tableName"></param>
@@ -176,10 +142,8 @@ namespace ForeignKeysQuery
         /// <param name="newFkReferences"></param>
         /// <returns></returns>
         /// <exception cref="ArgumentException"></exception>
-        private static async Task ExecuteOperationDatabaseAsync(string tableName, dynamic data, string operation, Dictionary<string, object> newFkReferences)
+        private static async Task ExecuteOperationDatabaseAsync(string tableName, dynamic data, string operation)
         {
-            var tablePK = await GetPrimaryKeys(schemaPostgres,tableName);
-
             using (var conn = new NpgsqlConnection(connectionStringPostgres))
             {
                 await conn.OpenAsync();
@@ -200,29 +164,6 @@ namespace ForeignKeysQuery
                 // Varre as propriedades do registro para popular as clausulas SQL (update e insert).
                 foreach (var property in dataJson.Properties())
                 {
-                    // A referência da tabela origem, virará destino s_{key} na base destino.
-                    if (tablePK.Any(x => x.Name.Equals(property.Name.ToLower())))
-                    {
-                        var key = tablePK.Find(x => x.Name.Equals(property.Name.ToLower()));
-
-                        if (key.IsAutoIncrement == false)
-                        {
-                            columnNames.Add($"s_{property.Name.ToLower()}");
-                            setClauses.Add($"s_{property.Name} = @p{index}");
-                            valuePlaceholders.Add($"@p{index}");
-                            index++;
-                        }
-                        else
-                        {
-                            columnNames.Add($"s_{property.Name.ToLower()}");
-                            setClauses.Add($"s_{property.Name} = @p{index}");
-                            valuePlaceholders.Add($"@p{index}");
-                            index++;
-                            continue;
-                        }
-
-                    }
-
                     columnNames.Add(property.Name.ToLower());
                     setClauses.Add($"{property.Name} = @p{index}");
                     valuePlaceholders.Add($"@p{index}");
@@ -242,37 +183,6 @@ namespace ForeignKeysQuery
 
                         foreach (var property in dataJson.Properties())
                         {
-                            // Verificar se há registro na tabela de PK
-                            if (tablePK.Any(x => x.Name.Equals(property.Name.ToLower())))
-                            {
-                                // Busca o registro especifico na coleção
-                                var key = tablePK.Find(x => x.Name.Equals(property.Name.ToLower()));
-
-                                if (key.IsAutoIncrement == false)
-                                {
-                                    cmd.Parameters.AddWithValue($"@p{index}",
-                                        property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>());
-
-                                    index++;
-                                }
-                                else
-                                {
-                                    cmd.Parameters.AddWithValue($"@p{index}",
-                                        property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>());
-
-                                    index++;
-                                    continue;
-                                }
-                            }
-
-                            if (newFkReferences.ContainsKey(property.Name))
-                            {
-                                cmd.Parameters.AddWithValue($"@p{index}",
-                                    property.Value.Type == JTokenType.Null ? DBNull.Value : newFkReferences[property.Name]);
-
-                                index++;
-                            }
-
                             var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
                             cmd.Parameters.AddWithValue($"@p{index}", value);
                             index++;
@@ -285,49 +195,19 @@ namespace ForeignKeysQuery
                 {
                     var setClause = string.Join(", ", setClauses);
 
-                    // Supondo que você tenha uma chave primária chamada "id" para usar no where
-                    var updateSql = $"UPDATE {schemaPostgres}.{tableName} SET {setClause} WHERE s_id = @s_id";
+                    // TODO: Ajustar o query do UPDATE AQUI
+                    var updateSql = $"UPDATE {schemaPostgres}.{tableName} SET {setClause} WHERE id = @id";
 
                     using (var cmd = new NpgsqlCommand(updateSql, conn))
                     {
                         index = 0;
                         foreach (var property in dataJson.Properties())
                         {
-                            if (tablePK.Any(x => x.Name.Equals(property.Name.ToLower())))
-                            {
-                                // Busca o registro especifico na coleção
-                                var key = tablePK.Find(x => x.Name.Equals(property.Name.ToLower()));
-
-                                if (key.IsAutoIncrement == false)
-                                {
-                                    cmd.Parameters.AddWithValue($"@p{index}",
-                                        property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>());
-
-                                    index++;
-                                }
-                                else
-                                {
-                                    cmd.Parameters.AddWithValue($"@p{index}",
-                                        property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>());
-
-                                    index++;
-                                    continue;
-                                }
-                            }
-
-                            if (newFkReferences.ContainsKey(property.Name))
-                            {
-                                cmd.Parameters.AddWithValue($"@p{index}",
-                                    property.Value.Type == JTokenType.Null ? DBNull.Value : newFkReferences[property.Name]);
-
-                                index++;
-                            }
-
                             var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
                             cmd.Parameters.AddWithValue($"@p{index}", value);
                             index++;
                         }
-                       
+
                         await cmd.ExecuteNonQueryAsync();
                     }
                 }
