@@ -4,6 +4,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Npgsql;
 using POC;
+using POC.Enum;
 using StackExchange.Redis;
 using System.Data.SqlClient;
 using System.Diagnostics;
@@ -17,7 +18,8 @@ namespace ForeignKeysQuery
         static string connectionStringRedis = "localhost:6379,password=Abc.2024";
         static ConnectionMultiplexer redis;
         static string schemaPostgres = "poc";
-        static List<string> topics = new List<string> { "fullfillment.pocconnect.dbo.addresses", "fullfillment.pocconnect.dbo.customer", "fullfillment.pocconnect.dbo.composta" };
+        static List<string> topics = new List<string> { "fullfillment.pocconnect.dbo.addresses", "fullfillment.pocconnect.dbo.customer",
+            "fullfillment.pocconnect.dbo.composta", "fullfillment.pocconnect.dbo.referenciacomposta" };
 
         private static void StartupCache()
         {
@@ -98,8 +100,26 @@ namespace ForeignKeysQuery
                                         {
                                             await ExecuteOperationDatabaseAsync(table, detail, op);
                                         }
-
-                                        consumer.Commit(consumeResult);
+                                        else
+                                        {
+                                            var retryMessage = new Message<Null, string> { Value = consumeResult.Message.Value };
+                                            producer.Produce(consumeResult.Topic, retryMessage, (deliveryReport) =>
+                                            {
+                                                if (deliveryReport.Error.Code != ErrorCode.NoError)
+                                                {
+                                                    Console.WriteLine($"Erro ao reenviar mensagem: {deliveryReport.Error.Reason}");
+                                                }
+                                                else
+                                                {
+                                                    Console.WriteLine("Mensagem reenviada para o final da fila.");
+                                                }
+                                            });
+                                        }
+                                    }
+                                    else if (op == "d")
+                                    {
+                                        var detail = data["before"];
+                                        await ExecuteOperationDatabaseAsync(table, detail, op);
                                     }
                                 }
                             }
@@ -125,6 +145,7 @@ namespace ForeignKeysQuery
                         }
                         finally
                         {
+                            consumer.Commit(consumeResult);
                             stopWatch.Stop();
                             Console.WriteLine(@$"RunTime {stopWatch.Elapsed:hh\:mm\:ss\.fff}");
                         }
@@ -144,6 +165,8 @@ namespace ForeignKeysQuery
         /// <exception cref="ArgumentException"></exception>
         private static async Task ExecuteOperationDatabaseAsync(string tableName, dynamic data, string operation)
         {
+            List<TableProperty> tableProperties = await GetPropertiesOriginTable(tableName, Database.SQLSERVER);
+
             using (var conn = new NpgsqlConnection(connectionStringPostgres))
             {
                 await conn.OpenAsync();
@@ -158,6 +181,7 @@ namespace ForeignKeysQuery
                 var columnNames = new List<string>();
                 var valuePlaceholders = new List<string>();
                 var setClauses = new List<string>();
+                var whereClauses = new List<string>();
 
                 int index = 0;
 
@@ -167,6 +191,12 @@ namespace ForeignKeysQuery
                     columnNames.Add(property.Name.ToLower());
                     setClauses.Add($"{property.Name} = @p{index}");
                     valuePlaceholders.Add($"@p{index}");
+
+                    if (tableProperties.Where(x => x.IsPrimaryKey).Any(x => x.Name == property.Name))
+                    {
+                        whereClauses.Add($"{property.Name.ToLower()} = @p{index}");
+                    }
+
                     index++;
                 }
 
@@ -177,53 +207,114 @@ namespace ForeignKeysQuery
 
                     var insertSql = $"INSERT INTO {schemaPostgres}.{tableName} ({columns}) VALUES ({values})";
 
+                    var listaIdValues = new List<object>();
                     using (var cmd = new NpgsqlCommand(insertSql, conn))
                     {
                         index = 0;
 
                         foreach (var property in dataJson.Properties())
                         {
-                            var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
-                            cmd.Parameters.AddWithValue($"@p{index}", value);
+                            if (tableProperties.Where(x => x.DataType.Equals("datetime")).Any(x => x.Name == property.Name))
+                            {
+                                long timestamp = (long)property.Value.ToObject<object>();
+                                DateTime dateTime = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).UtcDateTime;
+
+                                DateTime? value = property.Value.Type == JTokenType.Null ? null : dateTime;
+                                cmd.Parameters.AddWithValue($"@p{index}", value);
+                            }
+                            else
+                            {
+                                var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
+                                cmd.Parameters.AddWithValue($"@p{index}", value);
+                            }
+
+                            // Adicionando os ID para usar no cache
+                            if (tableProperties.Where(p => p.IsPrimaryKey).Any(x => x.Name == property.Name))
+                            {
+                                listaIdValues.Add(property.Value.ToObject<object>());
+                            }
+
                             index++;
                         }
 
                         await cmd.ExecuteNonQueryAsync();
+
+                        var ids = string.Join("-", tableProperties.Where(x => x.IsPrimaryKey).Select(x => x.Name));
+                        var valuesId = string.Join("-", listaIdValues);
+                        await redis.GetDatabase().StringSetAsync($"{tableName}.{ids}.{valuesId}", true);
                     }
                 }
                 else if (operation == "u") // Update
                 {
                     var setClause = string.Join(", ", setClauses);
+                    var setWhereClause = string.Join(" AND ", whereClauses);
 
                     // TODO: Ajustar o query do UPDATE AQUI
-                    var updateSql = $"UPDATE {schemaPostgres}.{tableName} SET {setClause} WHERE id = @id";
+                    var updateSql = $"UPDATE {schemaPostgres}.{tableName} SET {setClause} WHERE {setWhereClause}";
+
+                    var listaIdValues = new List<object>();
 
                     using (var cmd = new NpgsqlCommand(updateSql, conn))
                     {
                         index = 0;
                         foreach (var property in dataJson.Properties())
                         {
-                            var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
-                            cmd.Parameters.AddWithValue($"@p{index}", value);
+                            // Tratamento especial para datetime do SQL SERVER para POSTGRES
+                            if (tableProperties.Where(x => x.DataType.Equals("datetime")).Any(x => x.Name == property.Name))
+                            {
+                                long timestamp = (long)property.Value.ToObject<object>();
+                                DateTime dateTime = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).UtcDateTime;
+                                DateTime? value = property.Value.Type == JTokenType.Null ? null : dateTime;
+                                cmd.Parameters.AddWithValue($"@p{index}", value);
+                            }
+                            else
+                            {
+                                var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
+                                cmd.Parameters.AddWithValue($"@p{index}", value);
+                            }
+
+                            // Adicionando os ID para usar no cache
+                            if (tableProperties.Where(p => p.IsPrimaryKey).Any(x => x.Name == property.Name))
+                            {
+                                listaIdValues.Add(property.Value.ToObject<object>());
+                            }
+
                             index++;
                         }
 
                         await cmd.ExecuteNonQueryAsync();
+
+                        var ids = string.Join("-", tableProperties.Where(x => x.IsPrimaryKey).Select(x => x.Name));
+                        var valuesId = string.Join("-", listaIdValues);
+                        await redis.GetDatabase().StringSetAsync($"{tableName}.{ids}.{valuesId}", true);
                     }
                 }
                 else if (operation == "d") // Delete
                 {
-                    var deleteSql = $"DELETE FROM {schemaPostgres}.{tableName} WHERE id = @id";
+                    var setWhereClause = string.Join(" AND ", whereClauses);
 
+                    var deleteSql = $"DELETE FROM {schemaPostgres}.{tableName} WHERE {setWhereClause}";
+
+                    var listaIdValues = new List<object>();
                     using (var cmd = new NpgsqlCommand(deleteSql, conn))
                     {
-                        // Aqui você precisa garantir que o campo 'id' está presente no data
-                        if (dataJson["id"] == null)
+                        index = 0;
+                        foreach (var property in dataJson.Properties())
                         {
-                            throw new ArgumentException("O campo 'id' é obrigatório para operações de exclusão.");
+                            if (tableProperties.Where(p => p.IsPrimaryKey).Any(x => x.Name == property.Name))
+                            {
+                                var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
+                                cmd.Parameters.AddWithValue($"@p{index}", value);
+                                listaIdValues.Add(value);
+                            }
+
+                            index++;
                         }
-                        cmd.Parameters.AddWithValue("@id", dataJson["id"].ToObject<object>());
+
                         await cmd.ExecuteNonQueryAsync();
+                        var ids = string.Join("-", tableProperties.Where(x => x.IsPrimaryKey).Select(x => x.Name));
+                        var valuesId = string.Join("-", listaIdValues);
+                        await redis.GetDatabase().KeyDeleteAsync($"{tableName}.{ids}.{valuesId}");
                     }
                 }
             }
@@ -257,21 +348,26 @@ namespace ForeignKeysQuery
                     // Busque e traga somente as informações desta tabela que estamos iterando
                     IEnumerable<ForeignKeyInfo?> fksReferenceTable = fks.Where(r => r.ReferencedTable.Equals(key.FirstOrDefault()?.ReferencedTable, StringComparison.Ordinal));
 
+                    var fkItem = new KeyPar
+                    {
+                        Table = key.FirstOrDefault().ReferencedTable,
+                        Schema = key.FirstOrDefault().ParentSchema
+                    };
+
                     foreach (var fk in fksReferenceTable)
                     {
                         var value = data[fk?.ParentColumn];
                         if (value != null)
                         {
-                            // Adicione no keypar as referências da chave estrangeira
-                            keyPar.Add(new KeyPar
+                            fkItem.Keys.Add(new Key
                             {
-                                Key = $"s_{fk?.ReferencedColumn}",
+                                Name = $"{fk?.ReferencedColumn}",
                                 Value = value.ToString(),
-                                Table = fk.ReferencedTable,
-                                Schema = schema
                             });
                         }
                     }
+
+                    keyPar.Add(fkItem);
                 }
 
                 if (!keyPar.Any())
@@ -291,28 +387,43 @@ namespace ForeignKeysQuery
             }
         }
 
-        private static async Task<List<PrimaryKey>> GetPrimaryKeys(string schema, string table)
+        private static async Task<List<TableProperty>> GetPropertiesOriginTable(string table, Database database)
         {
-            var primaryKeys = new List<PrimaryKey>();
+            var keyCache = await redis.GetDatabase().StringGetAsync($"Property.{database}.{table}");
+            if (keyCache.HasValue)
+            {
+                return JsonConvert.DeserializeObject<List<TableProperty>>(keyCache);
+            }
+
+            var primaryKeys = new List<TableProperty>();
 
             string query = @$"SELECT 
-                            a.attname AS Name,
+                            c.COLUMN_NAME AS Name,
+                            c.DATA_TYPE AS DataType,
                             CASE 
-                                WHEN pg_get_serial_sequence(i.indrelid::regclass::text, a.attname) IS NOT NULL THEN 1
-                                ELSE 0
-                            END AS IsAutoIncrement
+                                WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 
+                                ELSE 0 
+                            END AS isPrimaryKey
                         FROM 
-                            pg_index i
-                            JOIN pg_attribute a ON a.attnum = ANY(i.indkey)
-                            AND a.attrelid = i.indrelid
+                            INFORMATION_SCHEMA.COLUMNS AS c
+                        LEFT JOIN 
+                            INFORMATION_SCHEMA.TABLE_CONSTRAINTS AS tc 
+                            ON c.TABLE_NAME = tc.TABLE_NAME 
+                            AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                        LEFT JOIN 
+                            INFORMATION_SCHEMA.KEY_COLUMN_USAGE AS kcu 
+                            ON c.TABLE_NAME = kcu.TABLE_NAME 
+                            AND c.COLUMN_NAME = kcu.COLUMN_NAME 
+                            AND tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
                         WHERE 
-                            i.indrelid = '{schema}.{table}'::regclass
-                            AND i.indisprimary;";
+                            c.TABLE_NAME = '{table}'
+                        ORDER BY 
+                            c.ORDINAL_POSITION;";
 
-            using (var connection = new NpgsqlConnection(connectionStringPostgres))
+            using (var connection = new SqlConnection(connectionString))
             {
                 await connection.OpenAsync();
-                var operation = await connection.QueryAsync<PrimaryKey>(query);
+                var operation = await connection.QueryAsync<TableProperty>(query);
 
                 foreach (var item in operation)
                 {
@@ -320,14 +431,11 @@ namespace ForeignKeysQuery
                 }
             }
 
+            await redis.GetDatabase().StringSetAsync($"Property.{database}.{table}", JsonConvert.SerializeObject(primaryKeys));
+
             return primaryKeys;
         }
 
-        private struct PrimaryKey
-        {
-            public string Name;
-            public bool IsAutoIncrement;
-        }
 
         /// <summary>
         /// Serviço que verifica se um determinado registro existe no banco dados.
@@ -337,46 +445,58 @@ namespace ForeignKeysQuery
         /// <returns></returns>
         private static async Task<bool> ExistsInDatabase(IEnumerable<KeyPar> keyPars)
         {
+            bool exists = false;
+            var list = new List<string>();
+
+            var whereClause = string.Join(" AND ", keyPars.SelectMany(x => x.Keys.Select(x => $" {x.Name} = {x.Value} ")));
 
             // Varre cada um dos pais desse registros para verificar a existência
             foreach (var keyPar in keyPars)
             {
                 // Verifica primeiro no Redis se o registro existe
-                var keyCache = await redis.GetDatabase().StringGetAsync($"{keyPar.Connector}.{keyPar.Table}.{keyPar.Key}.{keyPar.Value}");
+                var ids = string.Join("-", keyPar.Keys.Select(x => x.Name));
+                var valuesId = string.Join("-", keyPar.Keys.Select(x => x.Value));
+
+                var keyCache = await redis.GetDatabase().StringGetAsync($"{keyPar.Table}.{ids}.{valuesId}");
 
                 if (keyCache.HasValue)
                 {
-                    return true;
+                    exists = true;
                 }
-
-                // Caso contrário, vai até o banco de dados para fazer a verificação
-                string query = @$"SELECT 1 FROM {keyPar.Schema}.{keyPar.Table} WHERE {keyPar.Key} = @value LIMIT 1";
-
-                try
+                else
                 {
-                    using (var connection = new NpgsqlConnection(connectionStringPostgres))
+                    // Caso contrário, vai até o banco de dados para fazer a verificação
+                    string query = @$"SELECT 1 FROM {schemaPostgres}.{keyPar.Table} WHERE {whereClause} LIMIT 1";
+
+                    try
                     {
-                        await connection.OpenAsync();
-                        var operation = await connection.QueryFirstOrDefaultAsync<int?>(query, new { value = keyPar.Value });
-
-                        if (operation.HasValue == false)
+                        using (var connection = new NpgsqlConnection(connectionStringPostgres))
                         {
-                            return false;
-                        }
+                            await connection.OpenAsync();
+                            var operation = await connection.QueryFirstOrDefaultAsync<int?>(query);
 
-                        // E salva o registro no redis para eventuais consultas posteriores.
-                        await redis.GetDatabase().StringSetAsync($"{keyPar.Connector}.{keyPar.Table}.{keyPar.Key}.{keyPar.Value}", true);
+                            if (operation.HasValue == false)
+                            {
+                                exists = false;
+                            }
+                            else
+                            {
+                                // E salva o registro no redis para eventuais consultas posteriores.
+                                await redis.GetDatabase().StringSetAsync($"{keyPar.Table}.{ids}.{valuesId}", true);
+                            }
+                        }
                     }
-                }
-                catch (SqlException ex)
-                {
-                    // Em caso de falha, log o erro e sinalize que não conseguiu encontrar o pai retornando false
-                    Console.WriteLine($"An error occurred: {ex.Message}");
-                    return false;
+                    catch (SqlException ex)
+                    {
+                        // Em caso de falha, log o erro e sinalize que não conseguiu encontrar o pai retornando false
+                        Console.WriteLine($"An error occurred: {ex.Message}");
+                        return false;
+                    }
+
                 }
             }
 
-            return true;
+            return exists;
         }
 
         /// <summary>
