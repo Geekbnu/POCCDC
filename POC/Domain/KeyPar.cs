@@ -1,6 +1,6 @@
-﻿namespace POC
+﻿namespace POC.Domain
 {
-    internal class KeyPar
+    public class KeyPar
     {
         public List<Key> Keys { get; set; } = new();
         public string Table { get; set; }

@@ -3,7 +3,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.11.35312.102
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "POC", "POC\POC.csproj", "{7F9A040F-8FFE-46AD-985A-8CB451F26A3C}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "POC", "POC\POC.csproj", "{7F9A040F-8FFE-46AD-985A-8CB451F26A3C}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Presentation", "Presentation", "{F05E6CDB-BD3F-4A79-9FDE-0208C44FF0DD}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -18,6 +20,9 @@ Global
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{7F9A040F-8FFE-46AD-985A-8CB451F26A3C} = {F05E6CDB-BD3F-4A79-9FDE-0208C44FF0DD}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {5975AD73-436E-4225-891E-18334CF09BEC}

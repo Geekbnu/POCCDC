@@ -1,4 +1,4 @@
-﻿namespace POC
+﻿namespace POC.Domain
 {
     public struct TableProperty
     {
