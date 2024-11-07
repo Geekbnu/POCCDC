@@ -88,6 +88,7 @@ namespace POC.Services
                 if (op == DatabaseOperation.UPDATE || op == DatabaseOperation.CREATE)
                 {
                     var detail = data["after"];
+
                     var isDependencySatisfied = await _foreignKeyService.DependencyEngineSync(table, detail, foreignKeys);
                     if (isDependencySatisfied)
                     {

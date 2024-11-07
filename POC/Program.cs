@@ -19,7 +19,9 @@ namespace ForeignKeysQuery
             var _foreignKeyService = _serviceProvider.GetService<IForeignKeyService>();
             var _databaseService = _serviceProvider.GetService<IDatabaseService>();
 
-            var kafkaConsumer = new KafkaConsumerService(_redisCache, _property, _produce, _foreignKeyService, _databaseService);
+            var kafkaConsumer = new KafkaConsumerService(_redisCache, _property, _produce, 
+                _foreignKeyService, _databaseService);
+
             await kafkaConsumer.ConsumeMessages();
         }
 
