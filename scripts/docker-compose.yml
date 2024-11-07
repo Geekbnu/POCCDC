@@ -1,4 +1,3 @@
-#https://medium.com/@kayvan.sol2/debezium-source-connector-from-sql-server-to-apache-kafka-7d59d56f5cc7
 version: '3'
 volumes:
   data-sqlservers:
