@@ -82,6 +82,7 @@ namespace POC.Services
                     var detail = data["after"];
 
                     var isDependencySatisfied = await _foreignKeyService.DependencyEngineSync(table, detail);
+
                     if (isDependencySatisfied)
                     {
                         await _databaseService.ExecuteOperationAsync(table, detail, op);

@@ -6,6 +6,7 @@ using POC.Domain;
 using POC.Enum;
 using POC.Interfaces;
 using System.Data.SqlClient;
+using System.Diagnostics;
 
 namespace POC.Services
 {
@@ -122,7 +123,7 @@ namespace POC.Services
             using (var conn = new NpgsqlConnection(_property.GetProperty(Property.CONNECTIONSTRINGPOSTGRES)))
             {
                 await conn.OpenAsync();
-                
+
                 using (var cmd = new NpgsqlCommand(updateSql, conn))
                 {
                     index = 0;
@@ -279,6 +280,16 @@ namespace POC.Services
 
         public async Task<IEnumerable<ForeignKeyInfo>> GetReferencesTables(string table = "")
         {
+            // Ele para de executar a query para 100% das consultas. E passa a buscar do Cache.
+            // TODO: Raphael alterar para backgroundService e separar e transformar aqui em chamada para o Redis.
+
+            var key = _redisCache.GetAsync($"ReferenceTableDatabaseSQLSERVER");
+
+            if (key.Result.HasValue)
+            {
+                return JsonConvert.DeserializeObject<List<ForeignKeyInfo>>(key.Result);
+            }
+
             string query = @"
                SELECT 
                 fk.name AS ForeignKeyName,
@@ -288,23 +299,22 @@ namespace POC.Services
                 s2.name AS ReferencedSchema,
                 tr.name AS ReferencedTable,
                 cr.name AS ReferencedColumn
-            FROM 
-                sys.foreign_keys AS fk
-            INNER JOIN 
-                sys.foreign_key_columns AS fkc ON fk.object_id = fkc.constraint_object_id
-            INNER JOIN 
-                sys.tables AS tp ON fkc.parent_object_id = tp.object_id
-            INNER JOIN 
-                sys.schemas AS s1 ON tp.schema_id = s1.schema_id
-            INNER JOIN 
-                sys.columns AS cp ON fkc.parent_object_id = cp.object_id AND fkc.parent_column_id = cp.column_id
-            INNER JOIN 
-                sys.tables AS tr ON fkc.referenced_object_id = tr.object_id
-            INNER JOIN 
-                sys.schemas AS s2 ON tr.schema_id = s2.schema_id
-            INNER JOIN 
-                sys.columns AS cr ON fkc.referenced_object_id = cr.object_id AND fkc.referenced_column_id = cr.column_id"
-            ;
+                FROM 
+                    sys.foreign_keys AS fk
+                INNER JOIN 
+                    sys.foreign_key_columns AS fkc ON fk.object_id = fkc.constraint_object_id
+                INNER JOIN 
+                    sys.tables AS tp ON fkc.parent_object_id = tp.object_id
+                INNER JOIN 
+                    sys.schemas AS s1 ON tp.schema_id = s1.schema_id
+                INNER JOIN 
+                    sys.columns AS cp ON fkc.parent_object_id = cp.object_id AND fkc.parent_column_id = cp.column_id
+                INNER JOIN 
+                    sys.tables AS tr ON fkc.referenced_object_id = tr.object_id
+                INNER JOIN 
+                    sys.schemas AS s2 ON tr.schema_id = s2.schema_id
+                INNER JOIN 
+                    sys.columns AS cr ON fkc.referenced_object_id = cr.object_id AND fkc.referenced_column_id = cr.column_id";
 
             if (!string.IsNullOrEmpty(table))
             {
@@ -319,7 +329,11 @@ namespace POC.Services
                 {
                     await connection.OpenAsync();
 
-                    return connection.QueryAsync<ForeignKeyInfo>(query).Result;
+                    var result = connection.QueryAsync<ForeignKeyInfo>(query).Result;
+
+                    await _redisCache.SetAsync("ReferenceTableDatabaseSQLSERVER", result);
+
+                    return result;
                 }
             }
             catch (SqlException ex)
@@ -369,6 +383,7 @@ namespace POC.Services
                             {
                                 // E salva o registro no redis para eventuais consultas posteriores.
                                 await _redisCache.SetAsync($"{keyPar.Table}.{ids}.{valuesId}", true);
+                                exists = true;
                             }
                         }
                     }

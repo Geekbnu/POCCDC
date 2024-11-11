@@ -10,6 +10,8 @@ namespace ForeignKeysQuery
     {
         private static IServiceProvider _serviceProvider;
 
+
+        // TODO: Transformar em BackgroundServices (Raphael)
         static async Task Main(string[] args)
         {
             ServiceBind();

@@ -167,7 +167,6 @@ namespace POC.Tests
 
         }
 
-
         [Fact]
         public void TableCreateEventFromMessage()
         {
@@ -195,7 +194,6 @@ namespace POC.Tests
 
             Assert.NotNull(detail);
         }
-
 
         [Fact]
         public void DeleteDetailShouldBeNotNullFromMessage()
