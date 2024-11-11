@@ -1,7 +1,9 @@
-﻿namespace POC.Interfaces
+﻿using Confluent.Kafka;
+
+namespace POC.Interfaces
 {
     public interface IKafkaProducerService
     {
-        Task ProduceRetryMessage(string topic, string message);
+        Task ProduceRetryMessage(TopicPartition topic, string message);
     }
 }

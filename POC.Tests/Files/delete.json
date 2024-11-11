@@ -1,0 +1,25 @@
+{
+  "before": {
+    "id": 11,
+    "name": "ROMARIO",
+    "source": "S"
+  },
+  "after": null,
+  "source": {
+    "version": "2.4.2.Final",
+    "connector": "sqlserver",
+    "name": "fullfillment",
+    "ts_ms": 1731289567000,
+    "snapshot": "false",
+    "db": "pocconnect",
+    "sequence": null,
+    "schema": "dbo",
+    "table": "customer",
+    "change_lsn": "0000002b:000072c8:0002",
+    "commit_lsn": "0000002b:000072c8:0005",
+    "event_serial_no": 1
+  },
+  "op": "d",
+  "ts_ms": 1731289569276,
+  "transaction": null
+}

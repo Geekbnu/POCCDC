@@ -1,4 +1,5 @@
 ﻿using Confluent.Kafka;
+using POC.Domain;
 using POC.Interfaces;
 
 namespace POC.Services
@@ -7,17 +8,17 @@ namespace POC.Services
     {
         private readonly IProducer<Null, string> _producer;
 
-        public KafkaProducerService()
+        public KafkaProducerService(IPropertyService propertyService)
         {
             var configProducer = new ProducerConfig
             {
-                BootstrapServers = "localhost:9092",
+                BootstrapServers = propertyService.GetProperty(Property.BOOTSTRAP)
             };
 
             _producer = new ProducerBuilder<Null, string>(configProducer).Build();
         }
 
-        public async Task ProduceRetryMessage(string topic, string message)
+        public async Task ProduceRetryMessage(TopicPartition topic, string message)
         {
             var retryMessage = new Message<Null, string> { Value = message };
             _producer.Produce(topic, retryMessage, (deliveryReport) =>

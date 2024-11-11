@@ -3,7 +3,6 @@ using Newtonsoft.Json;
 using POC.Domain;
 using POC.Enum;
 using POC.Interfaces;
-using System.Data.SqlClient;
 using System.Diagnostics;
 
 namespace POC.Services
@@ -16,43 +15,38 @@ namespace POC.Services
         private readonly IForeignKeyService _foreignKeyService;
         private readonly IPropertyService _propertyService;
         private readonly IConsumer<Ignore, string> _consumer;
+        private readonly CancellationTokenSource _cts;
 
         public KafkaConsumerService(IRedisCacheService redisCache, IPropertyService propertyService, IKafkaProducerService produceService,
-            IForeignKeyService foreignKeyService, IDatabaseService databaseService)
+           IForeignKeyService foreignKeyService, IDatabaseService databaseService, IConsumer<Ignore, string> consumer, CancellationTokenSource cts)
+            : this(redisCache, propertyService, produceService, foreignKeyService, databaseService, consumer)
+        {
+            _cts = cts;
+        }
+
+        public KafkaConsumerService(IRedisCacheService redisCache, IPropertyService propertyService, IKafkaProducerService produceService,
+            IForeignKeyService foreignKeyService, IDatabaseService databaseService, IConsumer<Ignore, string> consumer)
         {
             _redisCache = redisCache;
             _propertyService = propertyService;
             _producerService = produceService;
             _databaseService = databaseService;
             _foreignKeyService = foreignKeyService;
+            _consumer = consumer;
 
-            var config = new ConsumerConfig
-            {
-                GroupId = _propertyService.GetProperty(Property.GROUPID),
-                BootstrapServers = _propertyService.GetProperty(Property.BOOTSTRAP),
-                AutoOffsetReset = AutoOffsetReset.Earliest,
-                EnableAutoCommit = false
-            };
-
-            _consumer = new ConsumerBuilder<Ignore, string>(config).Build();
+            _cts = new CancellationTokenSource();
         }
 
         public async Task ConsumeMessages()
         {
             _consumer.Subscribe(_propertyService.GetListProperty(Property.TOPICS));
 
-            CancellationTokenSource cts = new CancellationTokenSource();
-            Console.CancelKeyPress += (_, e) =>
-            {
-                e.Cancel = true;
-                cts.Cancel();
-            };
-
             while (true)
             {
                 try
                 {
-                    var consumeResult = _consumer.Consume(cts.Token);
+                    var consumeResult = _consumer.Consume(_cts.Token);
+
                     if (consumeResult?.Message?.Value != null)
                     {
                         await ProcessMessage(consumeResult);
@@ -70,7 +64,7 @@ namespace POC.Services
             }
         }
 
-        private async Task ProcessMessage(ConsumeResult<Ignore, string> consumeResult)
+        internal async Task ProcessMessage(ConsumeResult<Ignore, string> consumeResult)
         {
             Stopwatch stopWatch = Stopwatch.StartNew();
 
@@ -83,20 +77,18 @@ namespace POC.Services
 
                 var op = _databaseService.GetDatabaseOperation((char)data["op"]);
 
-                var foreignKeys = await _databaseService.GetReferencesTables();
-
                 if (op == DatabaseOperation.UPDATE || op == DatabaseOperation.CREATE)
                 {
                     var detail = data["after"];
 
-                    var isDependencySatisfied = await _foreignKeyService.DependencyEngineSync(table, detail, foreignKeys);
+                    var isDependencySatisfied = await _foreignKeyService.DependencyEngineSync(table, detail);
                     if (isDependencySatisfied)
                     {
                         await _databaseService.ExecuteOperationAsync(table, detail, op);
                     }
                     else
                     {
-                        await _producerService.ProduceRetryMessage(consumeResult.Topic, consumeResult.Message.Value);
+                        await _producerService.ProduceRetryMessage(consumeResult.TopicPartition, consumeResult.Message.Value);
                     }
                 }
                 else if (op == DatabaseOperation.DELETE)
@@ -105,14 +97,9 @@ namespace POC.Services
                     await _databaseService.ExecuteOperationAsync(table, detail, op);
                 }
             }
-            catch (SqlException ex)
-            {
-                Console.WriteLine($"Error processing message: {ex.Message}");
-            }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error processing message: {ex.Message}");
-                await _producerService.ProduceRetryMessage(consumeResult.Topic, consumeResult.Message.Value);
             }
             finally
             {

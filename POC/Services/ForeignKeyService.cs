@@ -11,9 +11,12 @@ namespace POC.Domain
             _databaseService = databaseService;
         }
 
-        public async Task<bool> DependencyEngineSync(string table, dynamic data, IEnumerable<ForeignKeyInfo> foreignKeys)
+        public async Task<bool> DependencyEngineSync(string table, dynamic data)
         {
             var keyPar = new List<KeyPar>();
+
+            // Busca dados das foreignKeys do Banco de dados (Cache)
+            var foreignKeys = await _databaseService.GetReferencesTables();
 
             // Busca nos registros de foreignKeys especificamente a tabela que está sendo processada.
             var fks = foreignKeys.Where(k => k.ParentTable.Equals(table));

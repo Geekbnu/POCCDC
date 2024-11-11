@@ -1,0 +1,25 @@
+{
+  "before": null,
+  "after": {
+    "id": 11,
+    "name": "JANIO",
+    "source": "SQLSERVER"
+  },
+  "source": {
+    "version": "2.4.2.Final",
+    "connector": "sqlserver",
+    "name": "fullfillment",
+    "ts_ms": 1730989386837,
+    "snapshot": "false",
+    "db": "pocconnect",
+    "sequence": null,
+    "schema": "dbo",
+    "table": "customer",
+    "change_lsn": "0000002a:000061f0:0002",
+    "commit_lsn": "0000002a:000061f0:0003",
+    "event_serial_no": 1
+  },
+  "op": "c",
+  "ts_ms": 1730989388538,
+  "transaction": null
+}

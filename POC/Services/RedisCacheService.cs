@@ -1,4 +1,5 @@
 ﻿using Newtonsoft.Json;
+using POC.Domain;
 using POC.Interfaces;
 using StackExchange.Redis;
 
@@ -6,12 +7,14 @@ namespace POC.Services
 {
     public class RedisCacheService : IRedisCacheService
     {
+        private readonly IPropertyService _propertyService;
         private readonly ConnectionMultiplexer _redis;
         private readonly IDatabase _database;
 
-        public RedisCacheService()
+        public RedisCacheService(IPropertyService propertyService)
         {
-            _redis = ConnectionMultiplexer.Connect("localhost:6379,password=Abc.2024");
+            _propertyService = propertyService;
+            _redis = ConnectionMultiplexer.Connect(_propertyService.GetProperty(Property.CONNECTIONSTRINGREDIS));
             _database = _redis.GetDatabase();
         }
 

@@ -24,160 +24,193 @@ namespace POC.Services
         public async Task ExecuteOperationAsync(string table, dynamic data, DatabaseOperation? operation)
         {
             List<TableProperty> tableProperties = await GetPropertiesOriginTable(table, Database.SQLSERVER);
+            List<string> columnNames, valuePlaceholders, setClauses, whereClauses;
 
+            var dataJson = data as JObject;
+
+            if (dataJson == null)
+            {
+                throw new ArgumentException("O parâmetro data deve ser um objeto JSON válido.");
+            }
+
+            GenerateClauses(tableProperties, dataJson, out columnNames, out valuePlaceholders, out setClauses, out whereClauses);
+
+            if (operation == DatabaseOperation.CREATE)
+            {
+                await Create(table, tableProperties, dataJson, columnNames, valuePlaceholders);
+            }
+            else if (operation == DatabaseOperation.UPDATE)
+            {
+                await Update(table, tableProperties, dataJson, setClauses, whereClauses);
+            }
+            else if (operation == DatabaseOperation.DELETE)
+            {
+                await Delete(table, tableProperties, dataJson, whereClauses);
+            }
+        }
+
+        private static void GenerateClauses(List<TableProperty> tableProperties, JObject? dataJson, out List<string> columnNames, out List<string> valuePlaceholders, out List<string> setClauses, out List<string> whereClauses)
+        {
+            columnNames = new List<string>();
+            valuePlaceholders = new List<string>();
+            setClauses = new List<string>();
+            whereClauses = new List<string>();
+            int index = 0;
+
+            // Varre as propriedades do registro para popular as clausulas SQL (update e insert).
+            foreach (var property in dataJson.Properties())
+            {
+                columnNames.Add(property.Name.ToLower());
+                setClauses.Add($"{property.Name} = @p{index}");
+                valuePlaceholders.Add($"@p{index}");
+
+                if (tableProperties.Where(x => x.IsPrimaryKey).Any(x => x.Name == property.Name))
+                {
+                    whereClauses.Add($"{property.Name.ToLower()} = @p{index}");
+                }
+
+                index++;
+            }
+        }
+
+        private async Task Delete(string table, List<TableProperty> tableProperties, JObject? dataJson, List<string> whereClauses)
+        {
+            int index;
+            var setWhereClause = string.Join(" AND ", whereClauses);
+
+            var deleteSql = $"DELETE FROM {_schemaPostgres}.{table} WHERE {setWhereClause}";
+
+            var listaIdValues = new List<object>();
             using (var conn = new NpgsqlConnection(_property.GetProperty(Property.CONNECTIONSTRINGPOSTGRES)))
             {
                 await conn.OpenAsync();
 
-                var dataJson = data as JObject;
-
-                if (dataJson == null)
+                using (var cmd = new NpgsqlCommand(deleteSql, conn))
                 {
-                    throw new ArgumentException("O parâmetro data deve ser um objeto JSON válido.");
-                }
-
-                var columnNames = new List<string>();
-                var valuePlaceholders = new List<string>();
-                var setClauses = new List<string>();
-                var whereClauses = new List<string>();
-
-                int index = 0;
-
-                // Varre as propriedades do registro para popular as clausulas SQL (update e insert).
-                foreach (var property in dataJson.Properties())
-                {
-                    columnNames.Add(property.Name.ToLower());
-                    setClauses.Add($"{property.Name} = @p{index}");
-                    valuePlaceholders.Add($"@p{index}");
-
-                    if (tableProperties.Where(x => x.IsPrimaryKey).Any(x => x.Name == property.Name))
+                    index = 0;
+                    foreach (var property in dataJson.Properties())
                     {
-                        whereClauses.Add($"{property.Name.ToLower()} = @p{index}");
-                    }
-
-                    index++;
-                }
-
-                if (operation == DatabaseOperation.CREATE)
-                {
-                    var columns = string.Join(", ", columnNames);
-                    var values = string.Join(", ", valuePlaceholders);
-
-                    var insertSql = $"INSERT INTO {_schemaPostgres}.{table} ({columns}) VALUES ({values})";
-
-                    var listaIdValues = new List<object>();
-                    using (var cmd = new NpgsqlCommand(insertSql, conn))
-                    {
-                        index = 0;
-
-                        foreach (var property in dataJson.Properties())
+                        if (tableProperties.Where(p => p.IsPrimaryKey).Any(x => x.Name == property.Name))
                         {
-                            if (tableProperties.Where(x => x.DataType.Equals("datetime")).Any(x => x.Name == property.Name))
-                            {
-                                long timestamp = (long)property.Value.ToObject<object>();
-                                DateTime dateTime = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).UtcDateTime;
-
-                                DateTime? value = property.Value.Type == JTokenType.Null ? null : dateTime;
-                                cmd.Parameters.AddWithValue($"@p{index}", value);
-                            }
-                            else
-                            {
-                                var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
-                                cmd.Parameters.AddWithValue($"@p{index}", value);
-                            }
-
-                            // Adicionando os ID para usar no cache
-                            if (tableProperties.Where(p => p.IsPrimaryKey).Any(x => x.Name == property.Name))
-                            {
-                                listaIdValues.Add(property.Value.ToObject<object>());
-                            }
-
-                            index++;
+                            var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
+                            cmd.Parameters.AddWithValue($"@p{index}", value);
+                            listaIdValues.Add(value);
                         }
 
-                        await cmd.ExecuteNonQueryAsync();
-
-                        var ids = string.Join("-", tableProperties.Where(x => x.IsPrimaryKey).Select(x => x.Name));
-                        var valuesId = string.Join("-", listaIdValues);
-                        await _redisCache.SetAsync($"{table}.{ids}.{valuesId}", true);
+                        index++;
                     }
+
+                    await cmd.ExecuteNonQueryAsync();
                 }
-                else if (operation == DatabaseOperation.UPDATE)
-                {
-                    var setClause = string.Join(", ", setClauses);
-                    var setWhereClause = string.Join(" AND ", whereClauses);
-
-                    // TODO: Ajustar o query do UPDATE AQUI
-                    var updateSql = $"UPDATE {_schemaPostgres}.{table} SET {setClause} WHERE {setWhereClause}";
-
-                    var listaIdValues = new List<object>();
-
-                    using (var cmd = new NpgsqlCommand(updateSql, conn))
-                    {
-                        index = 0;
-                        foreach (var property in dataJson.Properties())
-                        {
-                            // Tratamento especial para datetime do SQL SERVER para POSTGRES
-                            if (tableProperties.Where(x => x.DataType.Equals("datetime")).Any(x => x.Name == property.Name))
-                            {
-                                long timestamp = (long)property.Value.ToObject<object>();
-                                DateTime dateTime = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).UtcDateTime;
-                                DateTime? value = property.Value.Type == JTokenType.Null ? null : dateTime;
-                                cmd.Parameters.AddWithValue($"@p{index}", value);
-                            }
-                            else
-                            {
-                                var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
-                                cmd.Parameters.AddWithValue($"@p{index}", value);
-                            }
-
-                            // Adicionando os ID para usar no cache
-                            if (tableProperties.Where(p => p.IsPrimaryKey).Any(x => x.Name == property.Name))
-                            {
-                                listaIdValues.Add(property.Value.ToObject<object>());
-                            }
-
-                            index++;
-                        }
-
-                        await cmd.ExecuteNonQueryAsync();
-
-                        var ids = string.Join("-", tableProperties.Where(x => x.IsPrimaryKey).Select(x => x.Name));
-                        var valuesId = string.Join("-", listaIdValues);
-                        await _redisCache.SetAsync($"{table}.{ids}.{valuesId}", true);
-                    }
-                }
-                else if (operation == DatabaseOperation.DELETE)
-                {
-                    var setWhereClause = string.Join(" AND ", whereClauses);
-
-                    var deleteSql = $"DELETE FROM {_schemaPostgres}.{table} WHERE {setWhereClause}";
-
-                    var listaIdValues = new List<object>();
-                    using (var cmd = new NpgsqlCommand(deleteSql, conn))
-                    {
-                        index = 0;
-                        foreach (var property in dataJson.Properties())
-                        {
-                            if (tableProperties.Where(p => p.IsPrimaryKey).Any(x => x.Name == property.Name))
-                            {
-                                var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
-                                cmd.Parameters.AddWithValue($"@p{index}", value);
-                                listaIdValues.Add(value);
-                            }
-
-                            index++;
-                        }
-
-                        await cmd.ExecuteNonQueryAsync();
-                        var ids = string.Join("-", tableProperties.Where(x => x.IsPrimaryKey).Select(x => x.Name));
-                        var valuesId = string.Join("-", listaIdValues);
-                        await _redisCache.DeleteAsync($"{table}.{ids}.{valuesId}");
-                    }
-                }
+                var ids = string.Join("-", tableProperties.Where(x => x.IsPrimaryKey).Select(x => x.Name));
+                var valuesId = string.Join("-", listaIdValues);
+                await _redisCache.DeleteAsync($"{table}.{ids}.{valuesId}");
             }
         }
 
+        private async Task Update(string table, List<TableProperty> tableProperties, JObject? dataJson, List<string> setClauses, List<string> whereClauses)
+        {
+            int index;
+            var setClause = string.Join(", ", setClauses);
+            var setWhereClause = string.Join(" AND ", whereClauses);
+
+            // TODO: Ajustar o query do UPDATE AQUI
+            var updateSql = $"UPDATE {_schemaPostgres}.{table} SET {setClause} WHERE {setWhereClause}";
+
+            var listaIdValues = new List<object>();
+
+            using (var conn = new NpgsqlConnection(_property.GetProperty(Property.CONNECTIONSTRINGPOSTGRES)))
+            {
+                await conn.OpenAsync();
+                
+                using (var cmd = new NpgsqlCommand(updateSql, conn))
+                {
+                    index = 0;
+
+                    foreach (var property in dataJson.Properties())
+                    {
+                        // Tratamento especial para datetime do SQL SERVER para POSTGRES
+                        if (tableProperties.Where(x => x.DataType.Equals("datetime")).Any(x => x.Name == property.Name))
+                        {
+                            long timestamp = (long)property.Value.ToObject<object>();
+                            DateTime dateTime = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).UtcDateTime;
+                            DateTime? value = property.Value.Type == JTokenType.Null ? null : dateTime;
+                            cmd.Parameters.AddWithValue($"@p{index}", value);
+                        }
+                        else
+                        {
+                            var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
+                            cmd.Parameters.AddWithValue($"@p{index}", value);
+                        }
+
+                        // Adicionando os ID para usar no cache
+                        if (tableProperties.Where(p => p.IsPrimaryKey).Any(x => x.Name == property.Name))
+                        {
+                            listaIdValues.Add(property.Value.ToObject<object>());
+                        }
+
+                        index++;
+                    }
+
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                var ids = string.Join("-", tableProperties.Where(x => x.IsPrimaryKey).Select(x => x.Name));
+                var valuesId = string.Join("-", listaIdValues);
+                await _redisCache.SetAsync($"{table}.{ids}.{valuesId}", true);
+            }
+        }
+
+        private async Task Create(string table, List<TableProperty> tableProperties, JObject? dataJson, List<string> columnNames, List<string> valuePlaceholders)
+        {
+            int index;
+            var columns = string.Join(", ", columnNames);
+            var values = string.Join(", ", valuePlaceholders);
+
+            var insertSql = $"INSERT INTO {_schemaPostgres}.{table} ({columns}) VALUES ({values})";
+
+            var listaIdValues = new List<object>();
+
+            using (var conn = new NpgsqlConnection(_property.GetProperty(Property.CONNECTIONSTRINGPOSTGRES)))
+            {
+                await conn.OpenAsync();
+                using (var cmd = new NpgsqlCommand(insertSql, conn))
+                {
+                    index = 0;
+
+                    foreach (var property in dataJson.Properties())
+                    {
+                        if (tableProperties.Where(x => x.DataType.Equals("datetime")).Any(x => x.Name == property.Name))
+                        {
+                            long timestamp = (long)property.Value.ToObject<object>();
+                            DateTime dateTime = DateTimeOffset.FromUnixTimeMilliseconds(timestamp).UtcDateTime;
+
+                            DateTime? value = property.Value.Type == JTokenType.Null ? null : dateTime;
+                            cmd.Parameters.AddWithValue($"@p{index}", value);
+                        }
+                        else
+                        {
+                            var value = property.Value.Type == JTokenType.Null ? DBNull.Value : property.Value.ToObject<object>();
+                            cmd.Parameters.AddWithValue($"@p{index}", value);
+                        }
+
+                        // Adicionando os ID para usar no cache
+                        if (tableProperties.Where(p => p.IsPrimaryKey).Any(x => x.Name == property.Name))
+                        {
+                            listaIdValues.Add(property.Value.ToObject<object>());
+                        }
+
+                        index++;
+                    }
+
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                var ids = string.Join("-", tableProperties.Where(x => x.IsPrimaryKey).Select(x => x.Name));
+                var valuesId = string.Join("-", listaIdValues);
+                await _redisCache.SetAsync($"{table}.{ids}.{valuesId}", true);
+            }
+        }
 
         public DatabaseOperation? GetDatabaseOperation(char operationChar)
         {
